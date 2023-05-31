@@ -15,7 +15,12 @@
 - Classes and namespaces
 - Input validation
     - Does it need to verify that the appropriate number of licenses are available?
-    - Agent doesn't already exist in the system
+    - Agent doesn't already exist in the system as an agent or contact
+        - Message when agent already exists as agent, contact, or deleted contact 
+            "RuntimeException: System.Management.Automation.CmdletInvocationException: The remote server returned an error: (401) Unauthorized. ---> System.Net.WebException: The remote server returned an error: (401) Unauthorized.
+            at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.GetResponse(WebRequest request)
+            at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.ProcessRecord()
+            --- End of inner exception stack trace ---"
     - Invalid API key
     - API key lacking permissions
     - License, ticket scope, group Ids, or Role Ids case insensitive
@@ -37,6 +42,11 @@
     - CSV has content
 - Known issues
     - When outputting valid groups or roles, it's not in a freindly list format.
+    - Inconsistent formatting. Calling functions with and withour parameter names.
+- To do
+    - Put safely invoke rest method back the way it was
+    - Delete any test agents that you made
+
 #>
 
 # functions
@@ -153,22 +163,48 @@ function Parse-StringWithDelimiter($string, $delimiter)
     return ($string.Split("$delimiter")).Trim()
 }
 
-
 function Prompt-ApiKey
 {
-    $secureString = Read-Host "Please enter your API key" -AsSecureString
-    $plainKey = Convert-SecureStringToPlainText $secureString
-    return ConvertTo-Base64 ($plainKey + ":X")
-}
-function Convert-SecureStringToPlainText($secureString)
-{
-    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureString)
-    return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    do
+    {
+        $secureString = Read-Host "Please enter your API key" -AsSecureString
+        $psCredential = Convert-SecureStringToPsCredential $secureString
+        # Append :X because FreshDesk expects that. Could be X or anything else.
+        $encodedKey = ConvertTo-Base64 ($psCredential.GetNetworkCredential().Password + ":X")
+        $validKey = Validate-ApiKey $encodedKey
+    }
+    while (-not($validKey))    
+    return $encodedKey
 }
 
-function ConvertTo-Base64($plainText)
+function Validate-ApiKey($encodedKey)
 {
-    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($plainText))
+    $url = "https://blueravensolar.freshdesk.com/api/v2/agents/me"
+    $headers = @{
+        Authorization = "Basic $encodedKey"      
+    }
+
+    try
+    {
+        Invoke-RestMethod -Method "Get" -Uri $url -Headers $headers -ErrorVariable "responseError" | Out-Null
+    }
+    catch
+    {
+        Write-Host "API key invalid or lacks permissions. API request for your profile returned an error:`n$responseError" -ForegroundColor $failColor
+        return $false
+    }
+    return $true
+}
+
+function Convert-SecureStringToPsCredential($secureString)
+{
+    # just passing "null" for username, because username will not be used
+    return New-Object System.Management.Automation.PSCredential("null", $secureString)
+}
+
+function ConvertTo-Base64($text)
+{
+    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($text))
 }
 
 function Get-AllTicketScopeIds
@@ -187,7 +223,7 @@ function Get-AllGroupIds($encodedKey)
         Authorization = "Basic $encodedKey"      
     }
 
-    SafelyInvoke-RestMethod -Method "Get" -Url $url -Headers $headers
+    $groups = SafelyInvoke-RestMethod -Method "Get" -Uri $url -Headers $headers
     $lookupTable = @{}
     foreach ($group in $groups)
     {
@@ -197,17 +233,19 @@ function Get-AllGroupIds($encodedKey)
     return $lookupTable
 }
 
-function SafelyInvoke-RestMethod($uri, $method, $headers, $body)
+function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
 {
     try
     {
-        $response = Invoke-RestMethod -Uri $uri -Method $method -Headers $headers -Body $body -ErrorVariable "responseError"
+        $response = Invoke-RestMethod -Method $method -Uri $uri -Headers $headers -Body $body -ErrorVariable "responseError"
     }
     catch
     {
-        # Write-Host $responseError -ForegroundColor $failColor
+        # Write-Host $responseError[0].Message -ForegroundColor $failColor
         # exit
-        Throw $responseError # go back to exiting when done testing
+
+        # go back to exiting when done testing
+        Throw $responseError[0].Message
     }
 
     return $response
@@ -300,6 +338,8 @@ function Validate-Groups($agent, $allGroupIds)
     $hasShownValidGroups = $false
     foreach ($group in $agent.Groups)
     {
+        if ($group -eq "") { continue } # allow groups to be blank
+
         $isValidGroup = $allGroupIds.Contains($group.Trim())
         if (-not($isValidGroup))
         {
@@ -315,7 +355,7 @@ function Validate-Groups($agent, $allGroupIds)
             }
         }
     }
-    # should also return true when agent.Groups is empty
+
     return $valid
 }
 
@@ -325,6 +365,8 @@ function Validate-Roles($agent, $allRoleIds)
     $hasShownValidRoles = $false
     foreach ($role in $agent.Roles)
     {
+        if ($role -eq "") { continue } # allow roles to be blank
+
         $isValidRole = $allRoleIds.Contains($role.Trim())
         if (-not($isValidRole))
         {
@@ -341,7 +383,6 @@ function Validate-Roles($agent, $allRoleIds)
         }
     }
 
-    # should also return true when agent.Roles is empty
     return $valid
 }
 
@@ -370,13 +411,25 @@ function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $a
        role_ids = Get-AgentsRoleIds -Agent $agent -AllRoleIds $allRoleIds
     } | ConvertTo-Json
 
-    SafelyInvoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body
-}
+    try
+    {
+        Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
+    }
+    catch
+    {
+        Write-Host "There was an error adding agent: $($agent.Email)." -ForegroundColor $failColor
+        Write-Host $responseError[0].Message -ForegroundColor $failColor
 
+        if ($responseError[0].Message -imatch '.*409.*') # check for 409 Conflict error
+        {
+            Write-Host "This error may indicate the agent already exists in FD as an agent, contact, or deleted contact." -ForegroundColor $failColor
+        }   
+    }
+}
 
 function Get-AgentsGroupIds($agent, $allGroupIds)
 {
-    $groupIds = New-Object -TypeName System.Collections.Generic.List[string]
+    $groupIds = New-Object -TypeName System.Collections.Generic.List[UInt64]
 
     foreach ($group in $agent.Groups)
     {
@@ -388,7 +441,7 @@ function Get-AgentsGroupIds($agent, $allGroupIds)
 
 function Get-AgentsRoleIds($agent, $allRoleIds)
 {
-    $roleIds = New-Object -TypeName System.Collections.Generic.List[string]
+    $roleIds = New-Object -TypeName System.Collections.Generic.List[UInt64]
     
     foreach ($role in $agent.Roles)
     {
