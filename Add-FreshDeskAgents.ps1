@@ -15,38 +15,36 @@
 - Classes and namespaces
 - Input validation
     - Does it need to verify that the appropriate number of licenses are available?
+    - Entered duplicate agents on spreadsheet
+- Output validation
+    - Agent was created with all the right properties
+- Done but not tested
+- Done and tested
+    - Parsing delimited strings
+    - CSV has correct headers
+    - CSV is actually a CSV file
+    - CSV has content
+    - Invalid API key
+    - API key lacking permissions
+    - Validating for first and last name
+    - Validating email address
+    - Validating role exists
+    - Validating group exists
+    - Don't allow name to be empty
+    - Ticket scope or email must not be empty
+    - Certain fields on spreadsheet should be allowed to be empty
+    - License, ticket scope, group Ids, or Role Ids case insensitive
     - Agent doesn't already exist in the system as an agent or contact
         - Message when agent already exists as agent, contact, or deleted contact 
             "RuntimeException: System.Management.Automation.CmdletInvocationException: The remote server returned an error: (401) Unauthorized. ---> System.Net.WebException: The remote server returned an error: (401) Unauthorized.
             at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.GetResponse(WebRequest request)
             at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.ProcessRecord()
             --- End of inner exception stack trace ---"
-    - Invalid API key
-    - API key lacking permissions
-    - License, ticket scope, group Ids, or Role Ids case insensitive
-    - Entered duplicate agents on spreadsheet
-    - Certain fields on spreadsheet should be allowed to be empty
-    - Ticket scope or email must not be empty
-    - Don't allow name to be empty
-- Output validation
-    - Agent was created with all the right properties
-- Done but not tested
-    - Validating for first and last name
-    - Validating email address
-    - Validating role exists
-    - Validating group exists
-- Done and tested
-    - Parsing delimited strings
-    - CSV has correct headers
-    - CSV is actually a CSV file
-    - CSV has content
-- Known issues
-    - When outputting valid groups or roles, it's not in a freindly list format.
-    - Inconsistent formatting. Calling functions with and withour parameter names.
 - To do
+    - Capture API responses when adding agents and count successful responses
     - Put safely invoke rest method back the way it was
     - Delete any test agents that you made
-
+    - Prompt for FD url rather than hardcoding it
 #>
 
 # functions
@@ -54,8 +52,8 @@ function Initialize-ColorScheme
 {
     $script:successColor = "Green"
     $script:infoColor = "DarkCyan"
-    $script:failColor = "Red"
-    # warning color is yellow, but that is built into Write-Warning
+    $script:warningColor = "Yellow"
+    $script:failColor = "Red"    
 }
 
 function Show-Introduction
@@ -70,13 +68,13 @@ function Show-Tutorial
         "Full Name `n" +
         "Email `n" +
         "License `n" +
-        "`t Accepts `"Full Time`" or `"Occasional`" `n" +
+        "    Accepts `"Full Time`" or `"Occasional`" `n" +
         "Scope `n" +
-        "`t Accepts `"Global`", `"Group`", or `"Restricted`" `n" +
+        "    Accepts `"Global`", `"Group`", or `"Restricted`" `n" +
         "Groups `n" +
-        "`t Accepts one or more existing groups, comma separated. `n" +
+        "    Accepts one or more existing groups, comma separated. May also be left empty. `n" +
         "Roles `n" +
-        "`t Accepts one or more existing roles, comma separated. `n") -ForegroundColor $infoColor
+        "    Accepts one or more existing roles, comma separated. May also be left empty. `n") -ForegroundColor $infoColor
 }
 
 function Get-ExpectedHeaders
@@ -144,6 +142,11 @@ function Validate-CsvHeaders($importedCsv, $expectedHeaders)
         }
     }
     
+    if (-not($hasExpectedHeaders))
+    {
+        Write-Host "Please add the missing headers and try again." -ForegroundColor $warningColor
+    }
+
     return $hasExpectedHeaders
 }
 
@@ -190,7 +193,7 @@ function Validate-ApiKey($encodedKey)
     }
     catch
     {
-        Write-Host "API key invalid or lacks permissions. API request for your profile returned an error:`n$responseError" -ForegroundColor $failColor
+        Write-Host "API key invalid or lacks permissions. API request for your profile returned an error:`n$($responseError[0].Message)" -ForegroundColor $failColor
         return $false
     }
     return $true
@@ -241,11 +244,8 @@ function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
     }
     catch
     {
-        # Write-Host $responseError[0].Message -ForegroundColor $failColor
+        Write-Host $responseError[0].Message -ForegroundColor $failColor
         # exit
-
-        # go back to exiting when done testing
-        Throw $responseError[0].Message
     }
 
     return $response
@@ -296,7 +296,7 @@ function Validate-AgentData($agentRecords, $allTicketScopeIds, $allGroupIds, $al
 
     if (-not($valid))
     {
-        Write-Host "Please correct errors in CSV and try again." -ForegroundColor $failColor
+        Write-Host "Please correct errors in CSV and try again." -ForegroundColor $warningColor
     }
 
     return $valid
@@ -350,7 +350,7 @@ function Validate-Groups($agent, $allGroupIds)
             if (-not($hasShownValidGroups))
             {
                 Write-Host "Valid groups are:" -ForegroundColor $infoColor
-                Write-Host $allGroupIds.Keys -ForegroundColor $infoColor
+                $allGroupIds.Keys | Sort-Object | Format-List | Out-String | Write-Host -ForegroundColor $infoColor
                 $hasShownValidGroups = $true
             }
         }
@@ -377,7 +377,7 @@ function Validate-Roles($agent, $allRoleIds)
             if (-not($hasShownValidRoles))
             {
                 Write-Host "Valid roles are:" -ForegroundColor $infoColor
-                Write-Host $allRoleIds.Keys -ForegroundColor $infoColor
+                $allRoleIds.Keys | Sort-Object | Format-List | Out-String | Write-Host -ForegroundColor $infoColor
                 $hasShownValidRoles = $true
             }
         }
@@ -388,10 +388,15 @@ function Validate-Roles($agent, $allRoleIds)
 
 function Add-ImportedAgentsToFd($agentRecords, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
 {
+    $totalAdded = 0
     foreach ($agent in $agentRecords)
     {
-        Add-AgentToFd $agent $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
+        Write-Progress -Activity "Adding agents to FreshDesk..." -Status "$totalAdded agents added"
+        $response = Add-AgentToFd $agent $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
+        # if the response is success then $totalAdded++
     }
+
+    Write-Host "There were $totalAdded agents added!" -ForegroundColor $successColor
 }
 
 function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
@@ -413,7 +418,7 @@ function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $a
 
     try
     {
-        Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
+        $response = Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
     }
     catch
     {
@@ -425,10 +430,13 @@ function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $a
             Write-Host "This error may indicate the agent already exists in FD as an agent, contact, or deleted contact." -ForegroundColor $failColor
         }   
     }
+    return $response
 }
 
 function Get-AgentsGroupIds($agent, $allGroupIds)
 {
+    if ($agent.Groups -eq "") { return ,@() }
+    
     $groupIds = New-Object -TypeName System.Collections.Generic.List[UInt64]
 
     foreach ($group in $agent.Groups)
@@ -441,6 +449,8 @@ function Get-AgentsGroupIds($agent, $allGroupIds)
 
 function Get-AgentsRoleIds($agent, $allRoleIds)
 {
+    if ($agent.Roles -eq "") { return ,@() }
+
     $roleIds = New-Object -TypeName System.Collections.Generic.List[UInt64]
     
     foreach ($role in $agent.Roles)
@@ -476,7 +486,7 @@ do
     {
         $allRoleIds = Get-AllRoleIds $encodedKey
     }    
-    $isValidAgentData = Validate-AgentData -AgentRecords $agentRecords -AllTicketScopeIds $allTicketScopeIds -AllGroupIds $allGroupIds -AllRoleIds $allRoleIds
+    $isValidAgentData = Validate-AgentData $agentRecords $allTicketScopeIds $allGroupIds $allRoleIds
 }
 while (-not($isValidAgentData))
 Read-Host "Press Enter to add agents to FreshDesk"
