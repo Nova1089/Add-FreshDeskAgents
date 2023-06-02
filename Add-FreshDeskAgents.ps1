@@ -505,14 +505,7 @@ function Get-AgentsGroupIds($agent, $allGroupIds)
         $groupIds.Add($allGroupIds[$group])
     }
 
-    if ($groupIds.Count -le 1)
-    {
-        ,($groupIds.ToArray())
-    }
-    else
-    {
-        return $groupIds.ToArray()
-    }    
+    return Write-Output -NoEnumerate $groupIds.ToArray()
 }
 
 function Get-AgentsRoleIds($agent, $allRoleIds)
@@ -526,14 +519,7 @@ function Get-AgentsRoleIds($agent, $allRoleIds)
         $roleIds.Add($allRoleIds[$role])
     }
 
-    if ($groupIds.Count -le 1)
-    {
-        ,($groupIds.ToArray())
-    }
-    else
-    {
-        return $groupIds.ToArray()
-    }
+    return Write-Output -NoEnumerate $roleIds.ToArray()
 }
 
 # main
