@@ -41,10 +41,9 @@
             at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.ProcessRecord()
             --- End of inner exception stack trace ---"
 - To do
-    - Capture API responses when adding agents and count successful responses
     - Put safely invoke rest method back the way it was
-    - Delete any test agents that you made
-    - Prompt for FD url rather than hardcoding it
+    - Final tests
+    - Delete any test agents that were made
 #>
 
 # functions
@@ -77,9 +76,169 @@ function Show-Tutorial
         "    Accepts one or more existing roles, comma separated. May also be left empty. `n") -ForegroundColor $infoColor
 }
 
+function Get-ConnectionInfo
+{
+    $baseUrl = Prompt-Url
+    $myProfileUrl = "$baseUrl/api/v2/agents/me"
+    $encodedKey = Get-EncodedApiKey
+    $headers = @{
+        Authorization = "Basic $encodedKey"      
+    }
+
+    do
+    {
+        try
+        {
+            Invoke-RestMethod -Method "Get" -Uri $myProfileUrl -Headers $headers -ErrorVariable "responseError" | Out-Null
+        }
+        catch
+        {
+            Write-Warning "API request for your profile returned an error:`n$($responseError[0].Message)"
+            
+            if ($responseError[0].Message -like '*404*')
+            {
+                Write-Warning "URL is invalid. Please enter a valid FreshDesk URL (i.e., https://company-name.freshdesk.com)"
+                $baseUrl = Prompt-Url
+                $myProfileUrl = "$baseUrl/api/v2/agents/me"
+                continue
+            }
+            else
+            {
+                Write-Warning "API key invalid or lacks permissions."
+                $encodedKey = Get-EncodedApiKey
+                $headers = @{
+                    Authorization = "Basic $encodedKey"      
+                }
+                continue
+            }
+        }
+        $isValidConnection = $true
+    }
+    while (-not($isValidConnection))
+
+    return [PSCustomObject]@{
+        BaseUrl = $baseUrl
+        EncodedKey = $encodedKey
+    }
+}
+
+function Prompt-Url
+{
+    do
+    {
+        $url = Read-Host "Enter your FreshDesk URL (i.e., https://company-name.freshdesk.com)"
+        $validUrl = $url -match '^\s*https:\/\/.*\.freshdesk\.\w{2,}\s*$'
+
+        if (-not($validUrl))
+        {
+            Write-Warning "URL is invalid. Please enter a valid FreshDesk URL (i.e., https://company-name.freshdesk.com)"
+        }
+    }
+    while (-not($validUrl))
+
+    return $url.Trim()
+}
+
+function Get-EncodedApiKey
+{
+
+    $secureString = Read-Host "Please enter your API key" -AsSecureString
+    return Encode-Key $secureString
+    
+}
+
+function Encode-Key($secureString)
+{
+    $psCredential = Convert-SecureStringToPsCredential $secureString
+    # Append :X because FreshDesk expects that. Could be X or anything else.
+    return ConvertTo-Base64 ($psCredential.GetNetworkCredential().Password + ":X")
+}
+
+function Convert-SecureStringToPsCredential($secureString)
+{
+    # just passing "null" for username, because username will not be used
+    return New-Object System.Management.Automation.PSCredential("null", $secureString)
+}
+
+function ConvertTo-Base64($text)
+{
+    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($text))
+}
+
 function Get-ExpectedHeaders
 {
     return @("Full Name", "Email", "License", "Scope", "Groups", "Roles")
+}
+
+function Get-AllTicketScopeIds
+{
+    return @{
+        Global     = 1
+        Group      = 2
+        Restricted = 3
+    }
+}
+
+function Get-AllGroupIds($url, $encodedKey)
+{
+    $url = "$url/api/v2/groups"
+    $headers = @{
+        Authorization = "Basic $encodedKey"      
+    }
+
+    $groups = SafelyInvoke-RestMethod -Method "Get" -Uri $url -Headers $headers
+    $lookupTable = @{}
+    foreach ($group in $groups)
+    {
+        $lookupTable.Add($group.name, $group.id)
+    }
+
+    return $lookupTable
+}
+
+function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
+{
+    try
+    {
+        $response = Invoke-RestMethod -Method $method -Uri $uri -Headers $headers -Body $body -ErrorVariable "responseError"
+    }
+    catch
+    {
+        Write-Host $responseError[0].Message -ForegroundColor $failColor
+        # exit
+    }
+
+    return $response
+}
+
+function Get-AllRoleIds($url, $encodedKey)
+{
+    $url = "$url/api/v2/roles"
+    $headers = @{
+        Authorization = "Basic $encodedKey"      
+    }
+
+    $roles = SafelyInvoke-RestMethod -Method "Get" -Uri $url -Headers $headers
+    $lookupTable = @{}
+    foreach ($role in $roles)
+    {
+        $lookupTable.Add($role.name, $role.id)
+    }
+
+    return $lookupTable
+}
+
+function Import-AgentData($expectedHeaders, $allTicketScopeIds, $allGroupIds, $allRoleIds)
+{
+    do
+    {
+        $importedCsv = Prompt-Csv $expectedHeaders
+        $agentRecords = Parse-AgentRecords $importedCsv 
+        $isValidAgentData = Validate-AgentData $agentRecords $allTicketScopeIds $allGroupIds $allRoleIds
+    }
+    while (-not($isValidAgentData))
+
+    return $agentRecords
 }
 
 function Prompt-Csv($expectedHeaders)
@@ -166,107 +325,6 @@ function Parse-StringWithDelimiter($string, $delimiter)
     return ($string.Split("$delimiter")).Trim()
 }
 
-function Prompt-ApiKey
-{
-    do
-    {
-        $secureString = Read-Host "Please enter your API key" -AsSecureString
-        $psCredential = Convert-SecureStringToPsCredential $secureString
-        # Append :X because FreshDesk expects that. Could be X or anything else.
-        $encodedKey = ConvertTo-Base64 ($psCredential.GetNetworkCredential().Password + ":X")
-        $validKey = Validate-ApiKey $encodedKey
-    }
-    while (-not($validKey))    
-    return $encodedKey
-}
-
-function Validate-ApiKey($encodedKey)
-{
-    $url = "https://blueravensolar.freshdesk.com/api/v2/agents/me"
-    $headers = @{
-        Authorization = "Basic $encodedKey"      
-    }
-
-    try
-    {
-        Invoke-RestMethod -Method "Get" -Uri $url -Headers $headers -ErrorVariable "responseError" | Out-Null
-    }
-    catch
-    {
-        Write-Host "API key invalid or lacks permissions. API request for your profile returned an error:`n$($responseError[0].Message)" -ForegroundColor $failColor
-        return $false
-    }
-    return $true
-}
-
-function Convert-SecureStringToPsCredential($secureString)
-{
-    # just passing "null" for username, because username will not be used
-    return New-Object System.Management.Automation.PSCredential("null", $secureString)
-}
-
-function ConvertTo-Base64($text)
-{
-    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($text))
-}
-
-function Get-AllTicketScopeIds
-{
-    return @{
-        Global     = 1
-        Group      = 2
-        Restricted = 3
-    }
-}
-
-function Get-AllGroupIds($encodedKey)
-{
-    $url = "https://blueravensolar.freshdesk.com/api/v2/groups"
-    $headers = @{
-        Authorization = "Basic $encodedKey"      
-    }
-
-    $groups = SafelyInvoke-RestMethod -Method "Get" -Uri $url -Headers $headers
-    $lookupTable = @{}
-    foreach ($group in $groups)
-    {
-        $lookupTable.Add($group.name, $group.id)
-    }
-
-    return $lookupTable
-}
-
-function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
-{
-    try
-    {
-        $response = Invoke-RestMethod -Method $method -Uri $uri -Headers $headers -Body $body -ErrorVariable "responseError"
-    }
-    catch
-    {
-        Write-Host $responseError[0].Message -ForegroundColor $failColor
-        # exit
-    }
-
-    return $response
-}
-
-function Get-AllRoleIds($encodedKey)
-{
-    $url = "https://blueravensolar.freshdesk.com/api/v2/roles"
-    $headers = @{
-        Authorization = "Basic $encodedKey"      
-    }
-
-    $roles = SafelyInvoke-RestMethod -Method "Get" -Uri $url -Headers $headers
-    $lookupTable = @{}
-    foreach ($role in $roles)
-    {
-        $lookupTable.Add($role.name, $role.id)
-    }
-
-    return $lookupTable
-}
 
 function Validate-AgentData($agentRecords, $allTicketScopeIds, $allGroupIds, $allRoleIds)
 {
@@ -386,22 +444,25 @@ function Validate-Roles($agent, $allRoleIds)
     return $valid
 }
 
-function Add-ImportedAgentsToFd($agentRecords, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
+function Add-ImportedAgentsToFd($agentRecords, $url, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
 {
     $totalAdded = 0
     foreach ($agent in $agentRecords)
     {
         Write-Progress -Activity "Adding agents to FreshDesk..." -Status "$totalAdded agents added"
-        $response = Add-AgentToFd $agent $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
-        # if the response is success then $totalAdded++
+        $response = Add-AgentToFd $agent $url $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
+        if ($response.StatusCode -eq 201)
+        {
+            $totalAdded++
+        }
     }
 
     Write-Host "There were $totalAdded agents added!" -ForegroundColor $successColor
 }
 
-function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
+function Add-AgentToFd($agent, $url, $encodedKey, $allTicketScopeIds, $allGroupIds, $allRoleIds)
 {
-    $url = "https://blueravensolar.freshdesk.com/api/v2/agents"
+    $url = "$url/api/v2/agents"
     $headers = @{
         Authorization  = "Basic $encodedKey"
         "Content-Type" = "application/json"
@@ -418,17 +479,17 @@ function Add-AgentToFd($agent, $encodedKey, $allTicketScopeIds, $allGroupIds, $a
 
     try
     {
-        $response = Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
+        $response = Invoke-WebRequest -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
     }
     catch
     {
         Write-Host "There was an error adding agent: $($agent.Email)." -ForegroundColor $failColor
         Write-Host $responseError[0].Message -ForegroundColor $failColor
 
-        if ($responseError[0].Message -imatch '.*409.*') # check for 409 Conflict error
+        if ($responseError[0].Message -imatch '.*409.*') # check for 409 conflict error
         {
             Write-Host "This error may indicate the agent already exists in FD as an agent, contact, or deleted contact." -ForegroundColor $failColor
-        }   
+        }
     }
     return $response
 }
@@ -444,7 +505,14 @@ function Get-AgentsGroupIds($agent, $allGroupIds)
         $groupIds.Add($allGroupIds[$group])
     }
 
-    return $groupIds.ToArray()
+    if ($groupIds.Count -le 1)
+    {
+        ,($groupIds.ToArray())
+    }
+    else
+    {
+        return $groupIds.ToArray()
+    }    
 }
 
 function Get-AgentsRoleIds($agent, $allRoleIds)
@@ -458,37 +526,28 @@ function Get-AgentsRoleIds($agent, $allRoleIds)
         $roleIds.Add($allRoleIds[$role])
     }
 
-    return $roleIds.ToArray()
+    if ($groupIds.Count -le 1)
+    {
+        ,($groupIds.ToArray())
+    }
+    else
+    {
+        return $groupIds.ToArray()
+    }
 }
 
 # main
 Initialize-ColorScheme
 Show-Introduction
 Show-Tutorial
+$connectionInfo = Get-ConnectionInfo
+$baseUrl = $connectionInfo.BaseUrl
+$encodedKey = $connectionInfo.EncodedKey
 $expectedHeaders = Get-ExpectedHeaders
-do
-{
-    $agentRecords = Prompt-Csv $expectedHeaders
-    $agentRecords = Parse-AgentRecords $agentRecords
-    if ($null -eq $encodedKey)
-    {
-        $encodedKey = Prompt-ApiKey
-    }    
-    if ($null -eq $allTicketScopeIds)
-    {
-        $allTicketScopeIds = Get-AllTicketScopeIds
-    }
-    if ($null -eq $allGroupIds)
-    {
-        $allGroupIds = Get-AllGroupIds $encodedKey
-    }
-    if ($null -eq $allRoleIds)
-    {
-        $allRoleIds = Get-AllRoleIds $encodedKey
-    }    
-    $isValidAgentData = Validate-AgentData $agentRecords $allTicketScopeIds $allGroupIds $allRoleIds
-}
-while (-not($isValidAgentData))
+$allTicketScopeIds = Get-AllTicketScopeIds
+$allGroupIds = Get-AllGroupIds $baseUrl $encodedKey
+$allRoleIds = Get-AllRoleIds $baseUrl $encodedKey
+$agentRecords = Import-AgentData $expectedHeaders $allTicketScopeIds $allGroupIds $allRoleIds
 Read-Host "Press Enter to add agents to FreshDesk"
-Add-ImportedAgentsToFd $agentRecords $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
+Add-ImportedAgentsToFd $agentRecords $baseUrl $encodedKey $allTicketScopeIds $allGroupIds $allRoleIds
 Read-Host "Press Enter to exit"
