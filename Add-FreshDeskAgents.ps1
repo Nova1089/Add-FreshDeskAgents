@@ -1,49 +1,19 @@
 <#
-- Problem statement
-    - When adding a large list of new agents into FreshDesk, such as when bringing in a whole department, it takes a long time, as they must be entered one by one.
-- Use cases and features
-    - Enter spreadsheet with users and their appropriate group > creates all of them in FreshDesk, assigns license, group, scope, etc.
-    - Implements Write-Progress
-- Minimum viable product
-- Inputs
-    - CSV file
-- Outputs
-    - List of agents created successfully and unsuccessfully
-    - Can it return a link to each agent profile?
-- Program flow
-- Functions
-- Classes and namespaces
-- Input validation
-    - Does it need to verify that the appropriate number of licenses are available?
-    - Entered duplicate agents on spreadsheet
-- Output validation
-    - Agent was created with all the right properties
-- Done but not tested
-- Done and tested
-    - Parsing delimited strings
-    - CSV has correct headers
-    - CSV is actually a CSV file
-    - CSV has content
-    - Invalid API key
-    - API key lacking permissions
-    - Validating for first and last name
-    - Validating email address
-    - Validating role exists
-    - Validating group exists
-    - Don't allow name to be empty
-    - Ticket scope or email must not be empty
-    - Certain fields on spreadsheet should be allowed to be empty
-    - License, ticket scope, group Ids, or Role Ids case insensitive
-    - Agent doesn't already exist in the system as an agent or contact
-        - Message when agent already exists as agent, contact, or deleted contact 
-            "RuntimeException: System.Management.Automation.CmdletInvocationException: The remote server returned an error: (401) Unauthorized. ---> System.Net.WebException: The remote server returned an error: (401) Unauthorized.
-            at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.GetResponse(WebRequest request)
-            at Microsoft.PowerShell.Commands.WebRequestPSCmdlet.ProcessRecord()
-            --- End of inner exception stack trace ---"
-- To do
-    - Put safely invoke rest method back the way it was
-    - Final tests
-    - Delete any test agents that were made
+This script takes a CSV file with agents and adds them into FreshDesk.
+
+Fill out a CSV with the following headers:
+Full Name
+Email
+License
+    Accepts "Full Time" or "Occasional".
+Scope
+    Accepts "Global", "Group", or "Restricted".
+Groups
+    Accepts one or more existing groups, comma separated. May also be left empty.
+Roles
+    Accepts one or more existing roles, comma separated. May also be left empty.
+
+After that, just run script and follow the prompts.
 #>
 
 # functions
@@ -57,7 +27,7 @@ function Initialize-ColorScheme
 
 function Show-Introduction
 {
-    Write-Host "This script takes a CSV file with users and adds them into FreshDesk as agents." -ForegroundColor $infoColor
+    Write-Host "This script takes a CSV file with agents and adds them into FreshDesk." -ForegroundColor $infoColor
     Read-Host "Press Enter to continue"
 }
 
@@ -94,23 +64,30 @@ function Get-ConnectionInfo
         catch
         {
             Write-Warning "API request for your profile returned an error:`n$($responseError[0].Message)"
-            
-            if ($responseError[0].Message -like '*404*')
+
+            switch ([int]$_.Exception.Response.StatusCode)
             {
-                Write-Warning "URL is invalid. Please enter a valid FreshDesk URL (i.e., https://company-name.freshdesk.com)"
-                $baseUrl = Prompt-Url
-                $myProfileUrl = "$baseUrl/api/v2/agents/me"
-                continue
-            }
-            else
-            {
-                Write-Warning "API key invalid or lacks permissions."
-                $encodedKey = Get-EncodedApiKey
-                $headers = @{
-                    Authorization = "Basic $encodedKey"      
+                404
+                {
+                    Write-Warning "URL is invalid. Please enter a valid FreshDesk URL (i.e., https://company-name.freshdesk.com)"
+                    $baseUrl = Prompt-Url
+                    $myProfileUrl = "$baseUrl/api/v2/agents/me"
                 }
-                continue
+                401
+                {
+                    Write-Warning "API key invalid or lacks permissions."
+                    $encodedKey = Get-EncodedApiKey
+                    $headers = @{
+                        Authorization = "Basic $encodedKey"      
+                    }
+                }
+                default
+                {
+                    # If the error can't be resolved by fixing URL or API key, we'll have to exit.
+                    exit
+                }
             }
+            continue
         }
         $isValidConnection = $true
     }
@@ -205,7 +182,7 @@ function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
     catch
     {
         Write-Host $responseError[0].Message -ForegroundColor $failColor
-        # exit
+        exit
     }
 
     return $response
@@ -476,19 +453,27 @@ function Add-AgentToFd($agent, $url, $encodedKey, $allTicketScopeIds, $allGroupI
        group_ids = Get-AgentsGroupIds -Agent $agent -AllGroupIds $allGroupIds
        role_ids = Get-AgentsRoleIds -Agent $agent -AllRoleIds $allRoleIds
     } | ConvertTo-Json
-
+    
     try
     {
         $response = Invoke-WebRequest -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable responseError
     }
     catch
     {
-        Write-Host "There was an error adding agent: $($agent.Email)." -ForegroundColor $failColor
-        Write-Host $responseError[0].Message -ForegroundColor $failColor
+        Write-Warning "There was an error adding agent: $($agent.Email)."
+        Write-Host "    $($responseError[0].Message)" -ForegroundColor $warningColor
 
-        if ($responseError[0].Message -imatch '.*409.*') # check for 409 conflict error
+        switch ([int]$_.Exception.Response.StatusCode)
         {
-            Write-Host "This error may indicate the agent already exists in FD as an agent, contact, or deleted contact." -ForegroundColor $failColor
+            401
+            {
+                Write-Host "    Your API key is valid, but you are not authorized to create agents." -ForegroundColor $failColor
+                exit
+            }
+            409
+            {
+                Write-Host "    This error may indicate the agent already exists in FreshDesk as an agent, contact, or deleted contact." -ForegroundColor $warningColor
+            }
         }
     }
     return $response
@@ -505,7 +490,7 @@ function Get-AgentsGroupIds($agent, $allGroupIds)
         $groupIds.Add($allGroupIds[$group])
     }
 
-    return Write-Output -NoEnumerate $groupIds.ToArray()
+    return Write-Output $groupIds.ToArray() -NoEnumerate
 }
 
 function Get-AgentsRoleIds($agent, $allRoleIds)
@@ -519,8 +504,11 @@ function Get-AgentsRoleIds($agent, $allRoleIds)
         $roleIds.Add($allRoleIds[$role])
     }
 
-    return Write-Output -NoEnumerate $roleIds.ToArray()
+    return Write-Output $roleIds.ToArray() -NoEnumerate
 }
+
+# This line resolves a quirk in Powershell 5 that sometimes causes arrays to get wrapped in a PSObject, causing an issue with ConvertTo-Json.
+Remove-TypeData System.Array 
 
 # main
 Initialize-ColorScheme
