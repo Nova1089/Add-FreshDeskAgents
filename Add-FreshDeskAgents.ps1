@@ -120,15 +120,10 @@ function Get-EncodedApiKey
 {
 
     $secureString = Read-Host "Please enter your API key" -AsSecureString
-    return Encode-Key $secureString
-    
-}
-
-function Encode-Key($secureString)
-{
     $psCredential = Convert-SecureStringToPsCredential $secureString
     # Append :X because FreshDesk expects that. Could be X or anything else.
     return ConvertTo-Base64 ($psCredential.GetNetworkCredential().Password + ":X")
+    
 }
 
 function Convert-SecureStringToPsCredential($secureString)
@@ -224,6 +219,14 @@ function Prompt-Csv($expectedHeaders)
     {
         $path = Read-Host "Enter path to CSV"
         $path = $path.Trim('"')
+        $extension = [IO.Path]::GetExtension($path)
+
+        if ($extension -ne '.csv')
+        {
+            Write-Warning "File type is $extension. Please enter a CSV."
+            $keepGoing = $true
+            continue
+        }
 
         try
         {
@@ -234,7 +237,7 @@ function Prompt-Csv($expectedHeaders)
             Write-Warning "CSV not found."
             $keepGoing = $true
             continue
-        }        
+        }
 
         if ($records.Count -eq 0)
         {
@@ -339,12 +342,22 @@ function Validate-AgentData($agentRecords, $allTicketScopeIds, $allGroupIds, $al
 
 function Validate-Name($agent)
 {
-    return ($agent."Full Name" -imatch '^\s*\w+\s\w+\s*$') # regex ensures a first and last name
+    $valid = ($agent."Full Name" -imatch '^\s*\w+\s\w+\s*$') # regex ensures a first and last name
+    if (-not($valid))
+    {
+        Write-Warning "Name of $($agent."Full Name") is invalid for agent $($agent.Email)). Please include a first and last name using word characters."
+    }
+    return $valid
 }
 
 function Validate-Email($email)
 {
-    return ($email -imatch '^\s*[+\w\.-]+@[+\w\.-]+\.\w{2,}\s*$') # regex matches an email address but allows spaces
+    $valid = ($email -imatch '^\s*[+\w\.-]+@[+\w\.-]+\.\w{2,}\s*$') # regex matches an email address but allows spaces
+    if (-not($valid))
+    {
+        Write-Warning "Email of $($agent.Email) is invalid. Please use a valid email address."
+    }
+    return $valid
 }
 
 function Validate-License($agent)
