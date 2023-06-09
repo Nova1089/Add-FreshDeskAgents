@@ -345,7 +345,7 @@ function Validate-Name($agent)
     $valid = ($agent."Full Name" -imatch '^\s*.+\s.+\s*$') # regex ensures a first and last name
     if (-not($valid))
     {
-        Write-Warning "Name of $($agent."Full Name") is invalid for agent $($agent.Email)). Please include a first and last name using word characters."
+        Write-Warning "Name of $($agent."Full Name") is invalid for agent $($agent.Email)). Please include a first and last name."
     }
     return $valid
 }
