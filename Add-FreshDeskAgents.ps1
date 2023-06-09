@@ -177,7 +177,7 @@ function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
     catch
     {
         Write-Host $responseError[0].Message -ForegroundColor $failColor
-        exit
+        # exit
     }
 
     return $response
@@ -342,7 +342,7 @@ function Validate-AgentData($agentRecords, $allTicketScopeIds, $allGroupIds, $al
 
 function Validate-Name($agent)
 {
-    $valid = ($agent."Full Name" -imatch '^\s*\w+\s\w+\s*$') # regex ensures a first and last name
+    $valid = ($agent."Full Name" -imatch '^\s*.+\s.+\s*$') # regex ensures a first and last name
     if (-not($valid))
     {
         Write-Warning "Name of $($agent."Full Name") is invalid for agent $($agent.Email)). Please include a first and last name using word characters."
@@ -480,6 +480,7 @@ function Add-AgentToFd($agent, $url, $encodedKey, $allTicketScopeIds, $allGroupI
         {
             401
             {
+                # It says the API key is valid because it should have already been tested earlier in the script.
                 Write-Host "    Your API key is valid, but you are not authorized to create agents." -ForegroundColor $failColor
                 exit
             }
@@ -521,7 +522,7 @@ function Get-AgentsRoleIds($agent, $allRoleIds)
 }
 
 # This line resolves a quirk in Powershell 5 that sometimes causes arrays to get wrapped in a PSObject, causing an issue with ConvertTo-Json.
-Remove-TypeData System.Array 
+Remove-TypeData System.Array -ErrorAction SilentlyContinue
 
 # main
 Initialize-ColorScheme
