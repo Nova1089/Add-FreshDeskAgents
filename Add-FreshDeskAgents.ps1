@@ -177,7 +177,7 @@ function SafelyInvoke-RestMethod($method, $uri, $headers, $body)
     catch
     {
         Write-Host $responseError[0].Message -ForegroundColor $failColor
-        # exit
+        exit
     }
 
     return $response
